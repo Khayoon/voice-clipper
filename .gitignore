@@ -1,0 +1,25 @@
+# Local recordings and generated audio
+voice_clips/
+voice_clips_clean/
+separated/
+*.wav
+*.mp3
+*.flac
+
+# Python environments and caches
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Local credentials and editor settings
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
