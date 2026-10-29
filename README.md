@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/voice-clipper-icon.png" alt="Voice Clipper mascot: a smiling calico cat holding an orange audio waveform" width="240">
+</p>
+
 # Voice Clipper — collect voice AI training clips while watching VLC
 
 Build a collection of speech clips for voice AI datasets while you watch or listen. Start Voice Clipper, play your material in VLC, and tap **B** at the beginning and end of a line. Keep watching in full screen: each clip is saved automatically as a numbered WAV file.
