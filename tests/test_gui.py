@@ -89,7 +89,10 @@ def window(app, tmp_path, monkeypatch):
         },
     )
     w = gui.MainWindow(
-        player_factory=FakePlayer, data_dir=tmp_path / "app", recover=False
+        player_factory=FakePlayer,
+        data_dir=tmp_path / "app",
+        recover=False,
+        lazy_player=False,
     )
     w.settings["global_hotkeys"] = False
     w.source = str(tmp_path / "source.mp4")
@@ -333,3 +336,32 @@ def test_export_uses_snapshot_and_filters_rejected(window, tmp_path, monkeypatch
     drain(window)
     assert [c.id for c in seen] == [a.id]
     assert window._export_cancel is None
+
+
+def test_vlc_loads_only_when_local_playback_is_requested(app, tmp_path, monkeypatch):
+    calls = []
+
+    def factory(widget):
+        calls.append(True)
+        return FakePlayer(widget)
+
+    monkeypatch.setattr(
+        gui, "media_info", lambda *_: {"duration_ms": 60000, "audio_tracks": []}
+    )
+    w = gui.MainWindow(
+        player_factory=factory, data_dir=tmp_path / "lazy-app", recover=False
+    )
+    try:
+        assert w.player is None
+        assert not calls
+        assert "setup" not in w.empty_title.text()
+        source = tmp_path / "test.wav"
+        source.write_bytes(b"fake media")
+        w.load_media(source)
+        assert len(calls) == 1
+        assert w.loaded_source == str(source.resolve())
+        drain(w)
+    finally:
+        w._force_close = True
+        w.close()
+        app.processEvents()

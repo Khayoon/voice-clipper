@@ -30,6 +30,8 @@ demo-test.mp4
 demo-speech.mp4
 *-verification.json
 *-diagnostics.json
+*-diagnostics.stack.txt
+debug-dist/
 /*-gui.png
 test-gui.png
 *.log

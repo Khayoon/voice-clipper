@@ -51,7 +51,13 @@ if (($pythonBits -eq "64" -and $vlcMachine -eq 0x14c) -or ($pythonBits -eq "32" 
 }
 
 Push-Location -LiteralPath $repoPath
+$originalBuildPath = $env:PATH
 try {
+    # Resolve native dependencies from this Python and Windows, not unrelated
+    # media tools on PATH (whose ICU DLL can shadow the Windows ICU API).
+    $pythonBase = & $Python -c "import sys; print(sys.base_prefix)"
+    if ($LASTEXITCODE -ne 0) { throw "Could not inspect Python runtime." }
+    $env:PATH = @((Split-Path -Parent $Python), $pythonBase, (Join-Path $pythonBase "DLLs"), (Join-Path $env:SystemRoot "System32"), $env:SystemRoot) -join [IO.Path]::PathSeparator
     $buildArgs = @(
         "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir", "--windowed",
         "--name", "Voice Clipper", "--distpath", "dist", "--workpath", "build\pyinstaller",
@@ -106,5 +112,6 @@ by the particular VLC/FFmpeg/Qt binaries included in that build.
     Write-Host "Built $appPath"
     Write-Host "Distribute the entire Voice Clipper folder, not the .exe alone."
 } finally {
+    $env:PATH = $originalBuildPath
     Pop-Location
 }

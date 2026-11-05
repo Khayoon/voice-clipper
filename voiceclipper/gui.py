@@ -335,7 +335,9 @@ class MainWindow(QMainWindow):
     captureEvent = Signal(dict)
     globalAction = Signal(str)
 
-    def __init__(self, player_factory=VlcBackend, data_dir=None, recover=True):
+    def __init__(
+        self, player_factory=VlcBackend, data_dir=None, recover=True, lazy_player=True
+    ):
         super().__init__()
         self.setWindowTitle("Voice Clipper")
         self.resize(1320, 900)
@@ -383,15 +385,10 @@ class MainWindow(QMainWindow):
         self.pool.setMaxThreadCount(3)
         self._build_ui()
         self.player = None
-        try:
-            self.player = player_factory(self.video)
-        except Exception as exc:
-            self.empty_title.setText("VLC needs a quick setup")
-            self.empty_hint.setText(str(exc))
-            self.empty_hint.setWordWrap(True)
-            self.notice.setText(
-                "Install 64-bit VLC to enable embedded playback. Projects and export are still available."
-            )
+        self._player_factory = player_factory
+        self._vlc_error = None
+        if not lazy_player:
+            self._ensure_player(show_error=False)
         self.captureEvent.connect(self._capture_event)
         self.globalAction.connect(self._global_action)
         self._install_shortcuts()
@@ -925,13 +922,32 @@ class MainWindow(QMainWindow):
                         clip.source = str(Path(name).resolve())
             self.load_media(name)
 
+    def _ensure_player(self, show_error=True):
+        if self.player:
+            return True
+        try:
+            self.notice.setText("Opening VLC playback…")
+            self.player = self._player_factory(self.video)
+            self._vlc_error = None
+            return True
+        except Exception as exc:
+            self._vlc_error = str(exc)
+            self.empty_title.setText("VLC needs a quick setup")
+            self.empty_hint.setText(str(exc))
+            self.empty_hint.setWordWrap(True)
+            self.notice.setText(
+                "VLC playback is unavailable. Just Listen and export remain available."
+            )
+            if show_error:
+                self._show_error(str(exc))
+            return False
+
     def load_media(self, path, mark_dirty=True, replay=None):
         path = str(Path(path).resolve())
         if not Path(path).is_file():
             self._show_error("Source file not found: " + path)
             return
-        if not self.player:
-            self._show_error("Install 64-bit VLC to play media.")
+        if not self._ensure_player():
             return
         try:
             self.player.open(path)
@@ -1020,7 +1036,7 @@ class MainWindow(QMainWindow):
             )
 
     def play_pause(self):
-        if self.player and self.source:
+        if self.source and self._ensure_player():
             if self.loaded_source != self.source:
                 self.load_media(self.source, False)
             else:
@@ -1081,7 +1097,7 @@ class MainWindow(QMainWindow):
             else:
                 self.empty_title.setText(
                     "Your next collection starts here"
-                    if self.player
+                    if not self._vlc_error
                     else "VLC needs a quick setup"
                 )
                 self.empty_hint.setText(
@@ -1322,7 +1338,7 @@ class MainWindow(QMainWindow):
 
     def preview_clip(self):
         clip = self.selected_clip()
-        if not clip or not self.player:
+        if not clip or not self._ensure_player():
             return
         if self.loaded_source != clip.source:
             self.load_media(clip.source, mark_dirty=False, replay=clip)
