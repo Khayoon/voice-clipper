@@ -1,122 +1,240 @@
-"""
-isolate_vocals.py - strip score, foley and explosions out of the clips,
-leaving just the voice. Runs Demucs on your RTX 3060.
+"""Optional Demucs vocal estimates with content-verified, resumable caching.
 
-This is what makes the whole workflow practical: instead of hunting for lines
-that happen to have no music under them, grab any line you want and separate
-it afterwards.
-
-    pip install demucs soxr
-    (Demucs pulls in torch. For GPU, install the CUDA build of torch first:
-     https://pytorch.org - otherwise this falls back to CPU and is ~20x slower.)
-
-    python isolate_vocals.py
-
-Reads  voice_clips/*.wav
-Writes voice_clips_clean/*.wav   (mono, same filenames)
-
-Already-processed files are skipped, so you can rerun it after each movie.
+Captured originals are never changed. A previous output is reused only when its
+source hash, output hash, model and processing settings still match.
 """
 
+from __future__ import annotations
+import argparse
+import hashlib
+from importlib import metadata
+import json
 import os
-import shutil
+from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import uuid
 
-import numpy as np
-import soundfile as sf
+HERE = Path(__file__).resolve().parent
+IN_DIR = HERE / "voice_clips"
+OUT_DIR = HERE / "voice_clips_clean"
+MODEL = "htdemucs"
+BATCH = 16
+TARGET_SR = 48000
+MANIFEST_NAME = "separation_manifest.json"
 
-HERE       = os.path.dirname(os.path.abspath(__file__))
-IN_DIR     = os.path.join(HERE, "voice_clips")
-OUT_DIR    = os.path.join(HERE, "voice_clips_clean")
-MODEL      = "htdemucs"
-BATCH      = 16          # files per demucs invocation
-TARGET_SR  = 48000       # set to None to keep Demucs' native 44100
+
+def file_hash(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def processing_settings(model=MODEL, target_sr=TARGET_SR):
+    try:
+        version = metadata.version("demucs")
+    except metadata.PackageNotFoundError:
+        version = "not-installed"
+    return {
+        "model": model,
+        "target_sr": target_sr,
+        "demucs_version": version,
+        "stems": "vocals",
+        "channels": "mono-average",
+        "subtype": "PCM_16",
+    }
+
+
+def load_manifest(output_dir):
+    try:
+        data = json.loads(
+            (Path(output_dir) / MANIFEST_NAME).read_text(encoding="utf-8")
+        )
+        if data.get("version") == 1 and isinstance(data.get("files"), dict):
+            return data
+    except (OSError, ValueError, AttributeError):
+        pass
+    return {"version": 1, "files": {}}
+
+
+def save_manifest(output_dir, manifest):
+    path = Path(output_dir) / MANIFEST_NAME
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def cache_current(source, output, entry, settings):
+    if not isinstance(entry, dict) or entry.get("settings") != settings:
+        return False
+    if not Path(output).is_file():
+        return False
+    try:
+        return entry.get("source_sha256") == file_hash(source) and entry.get(
+            "output_sha256"
+        ) == file_hash(output)
+    except OSError:
+        return False
 
 
 def pick_device():
     try:
         import torch
+
         if torch.cuda.is_available():
-            print("using GPU: %s" % torch.cuda.get_device_name(0))
+            print("Using GPU: %s" % torch.cuda.get_device_name(0))
             return "cuda"
-        print("no CUDA build of torch found - falling back to CPU (slow).")
     except ImportError:
-        print("torch not importable - is demucs installed?")
+        pass
+    print("Using CPU for vocal separation.")
     return "cpu"
 
 
 def to_mono_at(path, target_sr):
-    audio, sr = sf.read(path, always_2d=True)
+    import soundfile as sf
+
+    audio, sr = sf.read(str(path), always_2d=True)
     mono = audio.mean(axis=1)
     if target_sr and sr != target_sr:
         try:
             import soxr
-            mono = soxr.resample(mono, sr, target_sr)
-            sr = target_sr
-        except ImportError:
-            pass          # keep native rate; `pip install soxr` to normalise
+        except ImportError as exc:
+            raise RuntimeError(
+                "Install soxr to produce the requested sample rate: pip install soxr"
+            ) from exc
+        mono = soxr.resample(mono, sr, target_sr)
+        sr = target_sr
     return mono, sr
 
 
-def main():
-    if not os.path.isdir(IN_DIR):
-        sys.exit("No %s folder yet - record some clips first." % IN_DIR)
+def separate(
+    input_dir=IN_DIR,
+    output_dir=OUT_DIR,
+    *,
+    model=MODEL,
+    batch=BATCH,
+    target_sr=TARGET_SR,
+    device=None,
+    runner=None,
+):
+    import soundfile as sf
 
-    os.makedirs(OUT_DIR, exist_ok=True)
-
-    todo = sorted(
-        name for name in os.listdir(IN_DIR)
-        if name.lower().endswith(".wav")
-        and not os.path.exists(os.path.join(OUT_DIR, name))
-    )
+    input_dir, output_dir = Path(input_dir).resolve(), Path(output_dir).resolve()
+    if input_dir == output_dir:
+        raise ValueError("Choose a separate output folder so originals are preserved.")
+    if not input_dir.is_dir():
+        raise ValueError(f"No input folder: {input_dir}")
+    if batch < 1 or (target_sr is not None and target_sr < 100):
+        raise ValueError("Batch size and sample rate must be positive.")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest = load_manifest(output_dir)
+    settings = processing_settings(model, target_sr)
+    todo = [
+        path
+        for path in sorted(input_dir.iterdir())
+        if path.is_file()
+        and path.suffix.lower() == ".wav"
+        and not cache_current(
+            path, output_dir / path.name, manifest["files"].get(path.name), settings
+        )
+    ]
     if not todo:
-        print("Nothing new to process.")
-        return
-
-    device = pick_device()
-    print("%d clip(s) to separate\n" % len(todo))
-
-    done = 0
-    warned_rate = False
-
-    for start in range(0, len(todo), BATCH):
-        batch = todo[start:start + BATCH]
-        tmp = tempfile.mkdtemp(prefix="demucs_")
-        try:
-            cmd = [
-                sys.executable, "-m", "demucs",
+        print("Nothing new or changed to process.")
+        return 0
+    device = device or pick_device()
+    runner = runner or subprocess.run
+    processed = 0
+    print(f"Separating {len(todo)} new/changed clip(s).")
+    for start in range(0, len(todo), batch):
+        items = todo[start : start + batch]
+        source_hashes = {path.name: file_hash(path) for path in items}
+        with tempfile.TemporaryDirectory(prefix="voice_clipper_demucs_") as temp_dir:
+            command = [
+                sys.executable,
+                "-m",
+                "demucs",
                 "--two-stems=vocals",
-                "-n", MODEL,
-                "-d", device,
-                "-o", tmp,
-            ] + [os.path.join(IN_DIR, name) for name in batch]
+                "-n",
+                model,
+                "-d",
+                device,
+                "-o",
+                temp_dir,
+                *map(str, items),
+            ]
+            result = runner(command)
+            if result.returncode:
+                raise RuntimeError(
+                    f"Demucs failed (exit {result.returncode}). Install requirements-vocals.txt and check its output."
+                )
+            for source in items:
+                vocals = Path(temp_dir) / model / source.stem / "vocals.wav"
+                if not vocals.is_file():
+                    raise RuntimeError(
+                        f"Demucs did not create a vocal estimate for {source.name}."
+                    )
+                mono, sr = to_mono_at(vocals, target_sr)
+                if file_hash(source) != source_hashes[source.name]:
+                    raise RuntimeError(
+                        f"{source.name} changed during separation. Run again to process the new source."
+                    )
+                destination = output_dir / source.name
+                temporary = output_dir / f".{source.stem}.{uuid.uuid4().hex}.tmp.wav"
+                try:
+                    sf.write(str(temporary), mono, sr, subtype="PCM_16")
+                    output_hash = file_hash(temporary)
+                    os.replace(temporary, destination)
+                finally:
+                    temporary.unlink(missing_ok=True)
+                manifest["files"][source.name] = {
+                    "source_sha256": source_hashes[source.name],
+                    "output_sha256": output_hash,
+                    "settings": settings,
+                    "actual_sample_rate": sr,
+                }
+                save_manifest(output_dir, manifest)
+                processed += 1
+                print(f"  Wrote vocal estimate: {source.name}")
+    print(f"{processed} clip(s) written to {output_dir}")
+    return processed
 
-            result = subprocess.run(cmd)
-            if result.returncode != 0:
-                sys.exit("demucs failed (exit %d). Is it installed? pip install demucs"
-                         % result.returncode)
 
-            for name in batch:
-                stem = os.path.splitext(name)[0]
-                vocals = os.path.join(tmp, MODEL, stem, "vocals.wav")
-                if not os.path.exists(vocals):
-                    print("  !! no vocals stem for %s" % name)
-                    continue
-                mono, sr = to_mono_at(vocals, TARGET_SR)
-                sf.write(os.path.join(OUT_DIR, name), mono, sr, subtype="PCM_16")
-                if TARGET_SR and sr != TARGET_SR and not warned_rate:
-                    print("  note: output is %d Hz. `pip install soxr` to get %d Hz."
-                          % (sr, TARGET_SR))
-                    warned_rate = True
-                done += 1
-                print("  cleaned %s" % name)
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-
-    print("\n%d clip(s) written to %s" % (done, OUT_DIR))
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input", type=Path, default=IN_DIR)
+    parser.add_argument("--output", type=Path, default=OUT_DIR)
+    parser.add_argument("--model", default=MODEL)
+    parser.add_argument("--batch", type=int, default=BATCH)
+    parser.add_argument(
+        "--sample-rate",
+        type=int,
+        default=TARGET_SR,
+        help="Output Hz; use 0 to keep the model's native rate.",
+    )
+    parser.add_argument("--device", choices=("cpu", "cuda"))
+    args = parser.parse_args(argv)
+    try:
+        separate(
+            args.input,
+            args.output,
+            model=args.model,
+            batch=args.batch,
+            target_sr=args.sample_rate or None,
+            device=args.device,
+        )
+        return 0
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -1,0 +1,76 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.13']
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-gui.txt
+            requirements-dev.txt
+      - name: Install media runtime from Ubuntu repositories
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg libvlc5 vlc-plugin-base libpulse0 libegl1 libopengl0
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Test capture state, project persistence and real FFmpeg exports
+        run: python -m pytest --junitxml=test-results.xml
+      - name: Check Python syntax
+        run: python -m compileall -q voiceclipper voice_clipper.py voice_clipper_gui.py isolate_vocals.py
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: test-results-python-${{ matrix.python }}
+          path: test-results.xml
+          if-no-files-found: ignore
+
+  windows:
+    runs-on: windows-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          architecture: x64
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Run deterministic tests on Windows
+        run: python -m pytest --junitxml=test-results-windows.xml
+      - name: Validate PowerShell scripts
+        shell: pwsh
+        run: |
+          Get-ChildItem scripts/*.ps1 | ForEach-Object {
+            $parseErrors = $null
+            $parseTokens = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$parseTokens, [ref]$parseErrors)
+            if ($parseErrors) { throw ($parseErrors | Out-String) }
+          }
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: test-results-windows
+          path: test-results-windows.xml
+          if-no-files-found: ignore

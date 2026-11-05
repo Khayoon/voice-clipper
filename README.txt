@@ -1,44 +1,38 @@
-voice_clipper - grab dialogue clips from a movie without leaving full screen
-============================================================================
+VOICE CLIPPER
+=============
 
-ONE-TIME SETUP
-    pip install soundcard soundfile keyboard numpy
+Watch -> mark -> replay -> export.
 
-    Optional, for stripping music/effects off the clips afterwards:
-    pip install demucs soxr
-    (install the CUDA build of torch first so it uses the 3060:
-     https://pytorch.org/get-started/locally/)
+TWO WAYS TO START
+Just Listen: capture any Windows audio, even while this app is minimized.
+Open video: watch a local file in the embedded VLC player and mark source clips.
+Both buttons are highlighted at the top, with Just Listen on the left.
 
-DAILY USE
-    python voice_clipper.py
+PACKAGED WINDOWS BUILD
+Extract the complete Voice Clipper folder and open Voice Clipper.exe.
+Keep its _internal folder beside the executable.
 
-    Then go watch the movie full screen in VLC / MPC-HC / a browser.
+RUN FROM SOURCE
+Install Python 3.11+, matching-architecture VLC, and ffmpeg/ffprobe on PATH.
+In this folder run:
+  powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-windows.ps1
+Then double-click Voice Clipper.cmd.
 
-        B            character starts talking -> press it
-        B            character stops -> press it again, clip is saved
-        F7            that one was bad -> deletes it
-        Ctrl+Shift+Q  quit
+LOCAL VIDEO WORKFLOW
+Open a file, play it, mark a line's start/end or save the previous few seconds.
+Replay and adjust clips, add transcript/speaker/language/translation, and review.
+Save the project and export WAV files with CSV/JSONL and Anki TSV metadata.
+The source video is preserved; local-file export extracts its selected audio
+track rather than recording desktop sounds or changes from playback speed.
 
-    Clips land in voice_clips\clip_0001.wav, clip_0002.wav, ...
-    Numbering resumes where you left off, so relaunching never overwrites.
+LIVE SYSTEM AUDIO
+Choose Just Listen for browsers and other players. It captures every application
+playing through the selected output device. Check the meter, then use Minimize
+to tray to keep clipping in the background. B starts/stops a clip; Ctrl+Shift+B
+saves the previous 10 seconds. F7 discards the latest; Ctrl+Shift+Z restores it.
+Settings lets you change these keys and the recordings folder.
+The CLI is also available:
+  .venv\Scripts\python.exe voice_clipper.py --help
 
-    Because of the rolling pre-roll buffer you can press B slightly LATE and
-    still get the whole line - it keeps the 1.5 seconds before your keypress.
-    Tune PRE_ROLL / POST_ROLL at the top of the script if you want more.
-
-CLEANING THEM UP
-    python isolate_vocals.py
-
-    Runs every new clip through Demucs and writes voice-only versions into
-    voice_clips_clean\. Rerunnable - it skips anything already done.
-
-GOTCHAS
-    - If your player runs as administrator, run the script as administrator
-      too, or Windows will not deliver the hotkey to it.
-    - It records the default output device. If you switch headphones/speakers
-      mid-session, restart the script.
-    - "near silence" warnings mean it is listening to the wrong device.
-    - Voice models trained on a real actor's performance are a consent and
-      copyright question, not just a technical one. Worth knowing before you
-      publish anything made with the dataset.
-
+Optional vocal separation remains in isolate_vocals.py and keeps originals.
+See README.md for installation, development, export, licensing and troubleshooting.
