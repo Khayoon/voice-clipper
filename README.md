@@ -75,7 +75,9 @@ Export creates derived files; it does not replace captured originals. Review tra
 
 Click **Just Listen**, immediately to the left of **Open video**. It starts the traditional Voice Clipper workflow without requiring any file to be open in the app. Choose the output device your browser, player, or other app uses, and check the level meter and ready status. The recorder captures all sound through that Windows output.
 
-Use **Minimize to tray** to keep listening and clipping in the background. Global hotkeys remain active while listening; double-click the tray icon to return. Closing the window finishes capture and closes the application. Returning to source-file mode stops live listening so clip buttons follow the visible mode.
+Use **Minimize to tray** to keep listening and clipping in the background. Global hotkeys remain active while listening; double-click the tray icon to return. The permanent hotkey status should say **Global hotkeys active** before switching away. Closing the window finishes capture and closes the application. Returning to source-file mode stops live listening so clip buttons follow the visible mode.
+
+The GUI uses its own checked Windows keyboard listener with an independent message pump. B is passed through to other apps, including text fields; it is not reserved or swallowed. Actions trigger once on release and ignore held-key repeats. The listener stays active when the GUI loses focus, is minimized, or is hidden to the tray. If Windows cannot start it, the hotkey status stays visibly unavailable instead of presenting local app shortcuts as global capture.
 
 Default GUI shortcuts (capture keys can be changed in Settings):
 

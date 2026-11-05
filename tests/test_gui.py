@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 import sys
+import threading
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
@@ -365,3 +366,138 @@ def test_vlc_loads_only_when_local_playback_is_requested(app, tmp_path, monkeypa
         w._force_close = True
         w.close()
         app.processEvents()
+
+
+class FakeGlobalListener:
+    created = []
+
+    def __init__(self, bindings, on_action, on_error):
+        self.bindings = bindings
+        self.action = on_action
+        self.error = on_error
+        self.running = False
+        self.created.append(self)
+
+    def start(self):
+        self.running = True
+
+    def stop(self):
+        self.running = False
+
+
+class FakeLiveCapture:
+    ready = True
+    recording = False
+
+    def __init__(self):
+        self.calls = []
+
+    def toggle(self):
+        self.calls.append(("toggle", threading.get_ident()))
+        self.recording = not self.recording
+
+    def save_last(self, seconds):
+        self.calls.append(("last", threading.get_ident()))
+
+    def stop(self):
+        self.ready = False
+        return True
+
+
+def start_global_test(window, monkeypatch, listener_class=FakeGlobalListener):
+    FakeGlobalListener.created = []
+    monkeypatch.setattr(gui, "GlobalHotkeys", listener_class)
+    window.devices.addItem("Test output", None)
+    window.capture = FakeLiveCapture()
+    window.capture_running = True
+    window.settings["global_hotkeys"] = True
+    window.mode.setCurrentIndex(1)
+    window._capture_event({"type": "ready", "device": "Test output"})
+    return window._global_listener
+
+
+@pytest.mark.parametrize("state", ["other_app", "minimized", "hidden"])
+def test_live_hotkeys_dispatch_on_gui_thread_without_foreground_focus(
+    window, app, monkeypatch, state
+):
+    listener = start_global_test(window, monkeypatch)
+    assert listener.running
+    assert "active" in window.hotkey_status.text()
+    # Simulate the stale Qt editor focus that can remain after switching apps.
+    window.name_edit.setEnabled(True)
+    window.name_edit.setFocus()
+    app.processEvents()
+    if state == "other_app":
+        monkeypatch.setattr(window, "isActiveWindow", lambda: False)
+    elif state == "minimized":
+        window.showMinimized()
+        app.processEvents()
+        monkeypatch.setattr(window, "isActiveWindow", lambda: True)
+    else:
+        window.hide()
+        app.processEvents()
+        monkeypatch.setattr(window, "isActiveWindow", lambda: True)
+    caller = threading.Thread(target=lambda: listener.action("toggle"))
+    caller.start()
+    caller.join()
+    assert window.capture.calls == []  # The worker does not access UI/capture state.
+    app.processEvents()
+    assert window.capture.calls == [("toggle", threading.get_ident())]
+    assert not window.shortcut_actions["toggle"].isEnabled()
+
+
+def test_typing_in_own_editor_does_not_toggle_capture(window, app, monkeypatch):
+    from PySide6.QtTest import QTest
+
+    clip = window.project.add_clip(window.source, 0, 1000)
+    window._refresh_clips(clip.id)
+    listener = start_global_test(window, monkeypatch)
+    window.name_edit.setFocus()
+    app.processEvents()
+    monkeypatch.setattr(window, "isActiveWindow", lambda: True)
+    listener.action("toggle")
+    QTest.keyClicks(window.name_edit, "Bob")
+    assert window.name_edit.text() == "Bob"
+    assert not window.capture.calls
+
+
+def test_queued_global_action_is_ignored_after_stop(window, app, monkeypatch):
+    listener = start_global_test(window, monkeypatch)
+    monkeypatch.setattr(window, "isActiveWindow", lambda: False)
+    caller = threading.Thread(target=lambda: listener.action("toggle"))
+    caller.start()
+    caller.join()
+    window._remove_global_hooks()
+    app.processEvents()
+    assert not listener.running and not window.global_hooks
+    assert window.capture.calls == []
+
+
+def test_global_install_failure_has_persistent_status_and_local_fallback(
+    window, app, monkeypatch
+):
+    class FailingListener(FakeGlobalListener):
+        def start(self):
+            raise OSError("Windows denied installation")
+
+    start_global_test(window, monkeypatch, FailingListener)
+    window.clips_list.setFocus()
+    app.processEvents()
+    window._focus_changed()
+    assert not window.global_hooks
+    assert "unavailable" in window.hotkey_status.text()
+    assert "Windows denied" in window.hotkey_status.text()
+    assert window.shortcut_actions["toggle"].isEnabled()
+    window._capture_event({"type": "state", "state": "idle"})
+    assert "unavailable" in window.hotkey_status.text()
+
+
+def test_ready_delivered_after_stop_cannot_reinstall_hooks(window, app, monkeypatch):
+    listener = start_global_test(window, monkeypatch)
+    window._stop_capture()
+    window._capture_event({"type": "ready", "device": "Queued ready"})
+    assert not listener.running
+    assert not window.global_hooks
+    assert len(FakeGlobalListener.created) == 1
+    drain(window)
+    assert not window.global_hooks and not window.capture_running

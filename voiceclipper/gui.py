@@ -53,6 +53,8 @@ from PySide6.QtWidgets import (
 from .models import Clip, Project
 from .export import media_info, export_clips, get_waveform, ExportCancelled
 from .player import VlcBackend
+from .hotkeys import GlobalHotkeys, HotkeyMatcher
+from . import __version__
 
 DEFAULT_SETTINGS = {
     "pre_roll": 1.5,
@@ -333,13 +335,14 @@ class SettingsDialog(QDialog):
 
 class MainWindow(QMainWindow):
     captureEvent = Signal(dict)
-    globalAction = Signal(str)
+    globalAction = Signal(str, int)
+    globalHookError = Signal(str, int)
 
     def __init__(
         self, player_factory=VlcBackend, data_dir=None, recover=True, lazy_player=True
     ):
         super().__init__()
-        self.setWindowTitle("Voice Clipper")
+        self.setWindowTitle(f"Voice Clipper {__version__}")
         self.resize(1320, 900)
         self.setMinimumSize(1080, 760)
         self.setAcceptDrops(True)
@@ -367,6 +370,8 @@ class MainWindow(QMainWindow):
         self.capture_running = False
         self.capture_stopping = False
         self.global_hooks = []
+        self._global_listener = None
+        self._hook_generation = 0
         self.shortcuts = []
         self._jobs = {}
         self._next_job = 0
@@ -391,6 +396,7 @@ class MainWindow(QMainWindow):
             self._ensure_player(show_error=False)
         self.captureEvent.connect(self._capture_event)
         self.globalAction.connect(self._global_action)
+        self.globalHookError.connect(self._global_hook_error)
         self._install_shortcuts()
         self._create_tray()
         self.autosave = QTimer(self)
@@ -557,6 +563,12 @@ class MainWindow(QMainWindow):
         self.level.setMaximumHeight(8)
         row.addWidget(self.level, 1)
         live.addLayout(row)
+        self.hotkey_status = QLabel(
+            "Global hotkeys are off · start Just Listen to enable them"
+        )
+        self.hotkey_status.setObjectName("muted")
+        self.hotkey_status.setWordWrap(True)
+        live.addWidget(self.hotkey_status)
         hint = QLabel(
             "Captures all sound through this output. Keep listening on while you mark clips."
         )
@@ -1121,7 +1133,11 @@ class MainWindow(QMainWindow):
         )
         self.last_button.setText(f"Save previous {self.settings['last_seconds']:g}s")
         self.mark_button.setEnabled(
-            (self.capture_running and bool(self.capture and self.capture.ready))
+            (
+                self.capture_running
+                and not self.capture_stopping
+                and bool(self.capture and self.capture.ready)
+            )
             if live
             else bool(self.player and self.source and self.loaded_source == self.source)
         )
@@ -1135,7 +1151,7 @@ class MainWindow(QMainWindow):
 
     def mark_toggle(self):
         if self.mode.currentIndex() == 1:
-            if self.capture and self.capture.ready:
+            if self.capture and self.capture.ready and not self.capture_stopping:
                 self.capture.toggle()
             self._update_mark_label()
             return
@@ -1168,7 +1184,7 @@ class MainWindow(QMainWindow):
     def save_previous(self):
         seconds = self.settings["last_seconds"]
         if self.mode.currentIndex() == 1:
-            if self.capture and self.capture.ready:
+            if self.capture and self.capture.ready and not self.capture_stopping:
                 self.capture.save_last(seconds)
             return
         if not self.player or not self.source:
@@ -1500,6 +1516,14 @@ class MainWindow(QMainWindow):
     def _capture_event(self, event):
         kind = event.get("type")
         if kind == "ready":
+            if (
+                not self.capture_running
+                or self.capture_stopping
+                or not self.capture
+                or not self.capture.ready
+                or self.mode.currentIndex() != 1
+            ):
+                return
             self.live_state.setText(
                 "Listening · " + str(event.get("device", "Windows output"))
             )
@@ -1617,16 +1641,34 @@ class MainWindow(QMainWindow):
         hooked = bool(self.global_hooks)
         for shortcut in self.shortcuts:
             is_hooked = hooked and shortcut in self.shortcut_actions.values()
-            shortcut.setEnabled(not editing and not is_hooked)
+            stopping = (
+                self.capture_stopping and shortcut in self.shortcut_actions.values()
+            )
+            shortcut.setEnabled(not editing and not is_hooked and not stopping)
 
-    def _global_action(self, action):
+    def _global_action(self, action, generation):
+        if generation != self._hook_generation:
+            return
+        if (
+            not self.capture_running
+            or self.capture_stopping
+            or not self.capture
+            or not self.capture.ready
+        ):
+            return
         if action == "quit":
             if not self.isActiveWindow():
                 self.show_from_tray()
                 self.close()
             return
-        if self.isActiveWindow() and isinstance(
-            QApplication.focusWidget(), (QLineEdit, QPlainTextEdit, QAbstractSpinBox)
+        if (
+            self.isVisible()
+            and not self.isMinimized()
+            and self.isActiveWindow()
+            and isinstance(
+                QApplication.focusWidget(),
+                (QLineEdit, QPlainTextEdit, QAbstractSpinBox),
+            )
         ):
             return
         {
@@ -1639,41 +1681,54 @@ class MainWindow(QMainWindow):
     def _install_global_hooks(self):
         self._remove_global_hooks()
         if not self.settings["global_hotkeys"]:
+            self.hotkey_status.setText(
+                "Global hotkeys are off · app controls only (enable them in Settings)"
+            )
             return
+        generation = self._hook_generation
         try:
-            import keyboard
-
-            for action in ("toggle", "last", "discard", "restore"):
-                handle = keyboard.add_hotkey(
-                    self.settings["key_" + action],
-                    lambda a=action: self.globalAction.emit(a),
-                    trigger_on_release=True,
-                )
-                self.global_hooks.append(handle)
-            self.global_hooks.append(
-                keyboard.add_hotkey(
-                    "ctrl+shift+q",
-                    lambda: self.globalAction.emit("quit"),
-                    trigger_on_release=True,
-                )
+            bindings = {
+                action: self.settings["key_" + action]
+                for action in ("toggle", "last", "discard", "restore")
+            }
+            bindings["quit"] = "ctrl+shift+q"
+            listener = GlobalHotkeys(
+                bindings,
+                lambda action: self.globalAction.emit(action, generation),
+                lambda message: self.globalHookError.emit(message, generation),
+            )
+            self._global_listener = listener
+            listener.start()
+            self.global_hooks = [listener]
+            self.hotkey_status.setText(
+                f"Global hotkeys active · {self.settings['key_toggle'].upper()} works in other apps and while minimized"
             )
         except Exception as exc:
             self._remove_global_hooks()
-            self.notice.setText(
-                "Global hotkeys unavailable; use the app controls. " + str(exc)
-            )
+            message = "Global hotkeys unavailable · " + str(exc)
+            self.hotkey_status.setText(message)
+            self.notice.setText(message)
+        self._focus_changed()
+
+    def _global_hook_error(self, message, generation):
+        if generation != self._hook_generation:
+            return
+        self._remove_global_hooks()
+        self.hotkey_status.setText("Global hotkeys unavailable · " + message)
+        self.notice.setText(message)
         self._focus_changed()
 
     def _remove_global_hooks(self):
-        if self.global_hooks:
-            import keyboard
-
-            for handle in self.global_hooks:
-                try:
-                    keyboard.remove_hotkey(handle)
-                except (KeyError, ValueError):
-                    pass
+        self._hook_generation += 1
+        listener, self._global_listener = self._global_listener, None
         self.global_hooks = []
+        if listener:
+            try:
+                listener.stop()
+            except OSError as exc:
+                self.notice.setText("Could not stop global hotkeys: " + str(exc))
+        self.hotkey_status.setText("Global hotkeys are off")
+        self._focus_changed()
 
     def configure(self):
         if self.capture_running:
@@ -1683,10 +1738,12 @@ class MainWindow(QMainWindow):
         while dialog.exec() == QDialog.DialogCode.Accepted:
             try:
                 values = dialog.values()
-                import keyboard
-
-                for key in ("key_toggle", "key_last", "key_discard", "key_restore"):
-                    keyboard.parse_hotkey(values[key])
+                bindings = {
+                    key: values[key]
+                    for key in ("key_toggle", "key_last", "key_discard", "key_restore")
+                }
+                bindings["quit"] = "ctrl+shift+q"
+                HotkeyMatcher(bindings)
                 self.settings.update(values)
                 self._write_preferences()
                 self._install_shortcuts()
@@ -1889,6 +1946,7 @@ def main(argv=None):
         return write_report(args[1])
     app = QApplication.instance() or QApplication(sys.argv if argv is None else argv)
     app.setApplicationName("Voice Clipper")
+    app.setApplicationVersion(__version__)
     app.setOrganizationName("Voice Clipper")
     app.setStyle("Fusion")
     app.setStyleSheet(STYLE)

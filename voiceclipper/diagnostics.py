@@ -10,6 +10,8 @@ from PySide6.QtWidgets import QApplication, QFrame
 from .export import find_tool
 from .player import VlcBackend
 from .capture import CaptureEngine
+from .hotkeys import GlobalHotkeys
+from . import __version__
 
 
 def write_report(path):
@@ -17,6 +19,7 @@ def write_report(path):
     target.parent.mkdir(parents=True, exist_ok=True)
     report = {
         "ok": False,
+        "app_version": __version__,
         "python": sys.version.split()[0],
         "frozen": bool(getattr(sys, "frozen", False)),
     }
@@ -58,6 +61,19 @@ def write_report(path):
         if sys.platform == "win32":
             checkpoint("Discovering loopback devices")
             report["loopback_devices"] = len(CaptureEngine.list_devices())
+            checkpoint("Checking native global hotkeys")
+            listener = GlobalHotkeys(
+                {"check": "ctrl+alt+shift+f10"}, lambda action: None
+            )
+            try:
+                listener.start()
+                report["global_hotkeys"] = {
+                    "backend": "Windows native passthrough hook",
+                    "installed": listener.running,
+                    "message_pump_verified": True,
+                }
+            finally:
+                listener.stop()
         report["ok"] = True
     except Exception as exc:
         report["error"] = str(exc)

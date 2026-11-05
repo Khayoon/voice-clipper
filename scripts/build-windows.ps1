@@ -69,10 +69,10 @@ try {
         "--exclude-module", "soundcard.__pyinstaller.conftest", "--exclude-module", "pytest",
         "--exclude-module", "PySide6.QtWebEngineCore", "--exclude-module", "PySide6.QtWebEngineWidgets",
         "--exclude-module", "PySide6.QtWebEngineQuick", "--exclude-module", "PySide6.QtPdf",
-        "--collect-all", "keyboard", "--copy-metadata", "python-vlc",
+        "--copy-metadata", "python-vlc",
         "--copy-metadata", "PySide6", "--copy-metadata", "numpy",
         "--copy-metadata", "soundcard", "--copy-metadata", "soundfile",
-        "--copy-metadata", "keyboard", "voice_clipper_gui.py"
+        "voice_clipper_gui.py"
     )
     & $Python @buildArgs
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
