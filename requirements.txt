@@ -1,4 +1,4 @@
-numpy
-soundcard
-soundfile
-keyboard
+numpy>=1.26,<3
+soundcard>=0.4.3,<1
+soundfile>=0.12,<1
+keyboard>=0.13.5,<1

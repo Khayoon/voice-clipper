@@ -12,6 +12,30 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+.pytest-*/
+build/
+dist/
+*.egg-info/
+*.spec
+.coverage
+htmlcov/
+
+# Local clip projects and export manifests
+*.voiceclipper.json
+*.vclip
+*-test-data/
+test-data/
+*-test-export/
+demo-test.mp4
+demo-speech.mp4
+*-verification.json
+*-diagnostics.json
+/*-gui.png
+test-gui.png
+*.log
+exports/
+sessions/
+.voice-clipper/
 
 # Local credentials and editor settings
 .env
